@@ -5,70 +5,42 @@ import Data.List (findIndex, foldl', nub, sort, transpose)
 import Data.Ratio ((%), numerator, denominator)
 import System.Exit (die)
 
--- ============================================================
--- 基本型
--- ============================================================
+-- 基準係数の省略条件と基準量変更の検査。
+-- 有理数演算を使い、係数比較と変更仕様の判定を行う。
 
--- 次元ベクトル。
--- 各成分は、固定した基本次元に対する整数指数を表す。
--- このプログラムの具体例では、長さ・質量・時間・電流の順。
+
+-- 基本型と登録情報
+
+-- 次元座標は長さ・質量・時間・電流の順。
 type Dim = [Integer]
 
--- 行列計算には厳密な有理数を用いる。
--- 浮動小数点による近似的な零判定や階数判定は行わない。
 type Row = [Rational]
 type Matrix = [Row]
 
--- ============================================================
--- 基準量・変数・式の登録情報
--- ============================================================
-
--- 基準量 B_i = b_i U_i の登録情報。
--- referenceScale は、固定した整合的単位系に対する数値 b_i。
--- 正規化値 x_i や変更倍率 lambda_i とは異なる。
+-- referenceScale は固定した整合的単位系での基準値 b_i。
+-- 正規化値や基準量の変更倍率とは区別する。
 data Reference = Reference
   { referenceName :: String
   , referenceDim :: Dim
   , referenceScale :: Rational
   } deriving (Eq, Show)
 
--- 入力変数と、その正規化に用いる基準量との対応。
---
--- Just i:
---   modelReferences の i 番目の基準量を使う。
---   添字は 0 始まり。
---
--- Nothing:
---   無次元変数であり、基準値を 1 に固定する。
---   「不明」「未登録」という意味ではない。
+-- Just i は i 番目の基準量を使う変数（0始まり）。
+-- Nothing は無次元変数を表し、基準値は1とする。
 data Variable = Variable
   { variableName :: String
   , variableReference :: Maybe Int
   } deriving (Eq, Show)
 
--- 一つの単項式 c * product_j x_j^(beta_j)。
---
--- termPowers の並びは modelVariables の並びと対応する。
--- 整数指数を許すので、負指数を含む Laurent 単項式も表せる。
---
--- 例:
---   変数順が [vo, voff, gain, rs] のとき、
---   Term 1 [1,0,-1,-1] は vo / (gain * rs) を表す。
+-- 整数指数の単項式。指数の順序は modelVariables に合わせる。
+-- [vo, voff, gain, rs] に対する [1,0,-1,-1] は vo/(gain*rs)。
 data Term = Term
   { termCoefficient :: Rational
   , termPowers :: [Integer]
   } deriving (Eq, Show)
 
--- 量の式と、入力・出力の基準量をまとめたモデル。
---
--- modelTerms:
---   正規化に伴う基準係数を掛ける前の式。
---
--- modelOutput:
---   Just i なら i 番目の基準量で出力を正規化する。
---   Nothing なら無次元出力であり、基準値は 1。
---
--- 基準量の数値は、一つの固定された整合的単位系に対して与える。
+-- modelTerms には基準係数を掛ける前の式を登録する。
+-- 出力が無次元なら modelOutput は Nothing。
 data Model = Model
   { modelName :: String
   , modelReferences :: [Reference]
@@ -77,73 +49,46 @@ data Model = Model
   , modelTerms :: [Term]
   } deriving (Eq, Show)
 
--- 基準量変更に対する検査対象。
---
--- factorExponents の各行が、基準係数
---   k_a = product_i b_i^(e_ai)
--- の指数を表す。
---
--- Model と異なり、入力変数や元の係数 c_beta は保持しない。
--- 検査したい無次元積だけを直接登録することもできる。
+-- 検査対象の係数 k_a = product_i b_i^(e_ai) を指数行で登録する。
+-- Model を介さず、無次元積だけを直接登録することもできる。
 data Contract = Contract
   { contractName :: String
   , contractReferences :: [Reference]
   , factorExponents :: [[Integer]]
   } deriving (Eq, Show)
 
--- 基準量変更に対して要求する仕様。
---
--- PreserveFactorsOnly:
---   登録した基準係数が変更前後で保存されればよい。
---
--- CommonDimensionScaling:
---   各基本次元に共通の倍率を与える変更を要求する。
---   これは、選択した基準量間の全次元関係の保存に対応する。
+-- 登録係数の保存だけを要求するか、共通次元倍率まで要求するか。
 data Policy = PreserveFactorsOnly | CommonDimensionScaling
   deriving (Eq, Show)
 
--- 基準量変更の検査結果。
 data Audit = Audit
-  { initialFactors :: [Rational]  -- 変更前の基準係数 k_a
-  , factorMultipliers :: [Rational]
-      -- 各係数の変更比 k_a' / k_a
-  , changedFactors :: [Rational]  -- 変更後の基準係数 k_a'
+  { initialFactors :: [Rational]
+  , factorMultipliers :: [Rational]  -- k_a' / k_a
+  , changedFactors :: [Rational]
   , initialOmissionAllowed :: Bool
-      -- 変更前の基準係数が全て 1 か
   , changedOmissionAllowed :: Bool
-      -- 変更後の基準係数が全て 1 か
   , factorPreserved :: Bool
-      -- 登録した全基準係数が保存されるか
   , allDimensionRelationsPreserved :: Bool
-      -- 全次元関係が保存されるか
   , allDimensionChecks :: [([Integer], Rational)]
-      -- ker M を張る整数指数と、その倍率積
   , additionalChecks :: [([Integer], Rational)]
-      -- 既存の係数検査を補う追加指数と、その倍率積
   , remainingDegrees :: Int
-      -- 元の E に対する不足数 delta。
-      -- 今回の倍率で不合格になった条件数ではない。
+      -- 元の検査行列に対する不足数 delta。不合格件数ではない。
   , policySatisfied :: Bool
-      -- 選択した仕様に対する最終判定
   } deriving (Eq, Show)
 
--- 候補式との係数比較で見つかった不一致。
 data Mismatch = Mismatch
-  { mismatchPowers :: [Integer]       -- 不一致の単項式指数
-  , expectedCoefficient :: Rational  -- 必要な係数
-  , suppliedCoefficient :: Rational  -- 候補式の係数
+  { mismatchPowers :: [Integer]
+  , expectedCoefficient :: Rational
+  , suppliedCoefficient :: Rational
   } deriving (Eq, Show)
 
--- ============================================================
--- エラー処理と基準量の検証
--- ============================================================
 
--- 条件が真なら成功し、偽ならエラーメッセージを返す。
--- Either の do ブロックでは、Left が出た時点で処理を打ち切る。
+-- 登録情報の検証
+
 ensure :: Bool -> String -> Either String ()
 ensure p msg = if p then Right () else Left msg
 
--- 基準量の登録情報を検証し、次元ベクトルの長さを返す。
+-- 基準値の正値性、次元ベクトルの長さ、識別名の重複を確認する。
 validateReferences :: [Reference] -> Either String Int
 validateReferences [] =
   Left "No references"
@@ -151,107 +96,77 @@ validateReferences [] =
 validateReferences rs@(r : _) = do
   let d = length (referenceDim r)
 
-  -- 次元座標を少なくとも一つ持つことを要求する。
   ensure (d > 0)
          "Empty dimension vector"
 
-  -- 全基準量で同じ次元座標系を使う。
   ensure (all ((== d) . length . referenceDim) rs)
          "Dimension-vector length mismatch"
 
-  -- 正の基準量だけを扱う。
-  -- 負指数の計算と、正倍率に基づく保存条件の議論にも必要。
   ensure (all ((> 0) . referenceScale) rs)
          "Reference scales must be positive"
 
-  -- 識別名の重複を拒否する。
   ensure (length (nub (map referenceName rs)) == length rs)
          "Duplicate reference IDs"
 
   pure d
 
--- ============================================================
--- 有理数による線形代数
--- ============================================================
 
--- 簡約行階段形とピボット列の一覧を求める。
---
--- n は列数。
--- 入力行列の各行が n 成分を持つことを前提とする。
--- この低水準関数自体では行長を検証しない。
+-- 有理数による行列計算
+
+-- 簡約行階段形とピボット列を返す。
+-- 各行が n 成分であることは呼出し側で確認する。
 rref :: Int -> Matrix -> (Matrix, [Int])
 rref n input = go 0 0 input []
   where
-    -- r: 次にピボットを置く行
-    -- c: 調べる列
-    -- a: 作業中の行列
-    -- piv: 確定したピボット列
     go r c a piv
       | r >= length a || c >= n = (a, piv)
-      | otherwise = case findIndex ((/= 0) . (!! c)) (drop r a) of
+      | otherwise =
+          case findIndex ((/= 0) . (!! c)) (drop r a) of
+            Nothing ->
+              go r (c + 1) a piv
 
-          -- 現在行以降に非零成分がない列は飛ばす。
-          Nothing -> go r (c+1) a piv
+            Just k ->
+              let
+                  j = r + k
 
-          Just k ->
-            let
-                -- findIndex は drop r a 内の添字を返すため補正する。
-                j = r+k
+                  swapped =
+                    [ if i == r then a !! j
+                      else if i == j then a !! r
+                      else row
+                    | (i, row) <- zip [0..] a
+                    ]
 
-                -- 見つかった行を現在のピボット行へ移す。
-                swapped =
-                  [ if i == r then a !! j
-                    else if i == j then a !! r
-                    else row
-                  | (i,row) <- zip [0..] a
-                  ]
+                  pivot =
+                    map (/ ((swapped !! r) !! c)) (swapped !! r)
 
-                -- ピボット成分を 1 にする。
-                pivot =
-                  map (/ ((swapped !! r) !! c)) (swapped !! r)
+                  reduced =
+                    [ if i == r then pivot
+                      else zipWith (-) row
+                             (map (* (row !! c)) pivot)
+                    | (i, row) <- zip [0..] swapped
+                    ]
 
-                -- ピボット行以外の全行から第 c 成分を消去する。
-                -- 上側も下側も消去するので簡約行階段形となる。
-                reduced =
-                  [ if i == r then pivot
-                    else zipWith (-) row
-                           (map (* (row !! c)) pivot)
-                  | (i,row) <- zip [0..] swapped
-                  ]
+              in go (r + 1) (c + 1) reduced (piv ++ [c])
 
-            in go (r+1) (c+1) reduced (piv ++ [c])
-
--- 階数はピボット列の数。
 rank :: Int -> Matrix -> Int
 rank n = length . snd . rref n
 
--- A z = 0 の有理数核基底を求める。
---
--- 各基底ベクトルを、返り値の一つの行として格納する。
--- 行列が空なら、R^n の標準基底を返す。
+-- A z = 0 の有理数基底。基底ベクトルを行として返す。
 nullspace :: Int -> Matrix -> Matrix
 nullspace n a =
   let
-      (r,piv) = rref n a
+      (r, piv) = rref n a
+      free = filter (`notElem` piv) [0..n - 1]
 
-      -- ピボットでない列を自由変数とする。
-      free = filter (`notElem` piv) [0..n-1]
+      column f j =
+        case lookup j (zip piv r) of
+          Just row -> negate (row !! f)
+          Nothing -> if j == f then 1 else 0
 
-      -- 自由変数 f を 1、他の自由変数を 0 にした解の第 j 成分。
-      column f j = case lookup j (zip piv r) of
-        Just row -> negate (row !! f)
-        Nothing -> if j == f then 1 else 0
+  in [ [column f j | j <- [0..n - 1]] | f <- free ]
 
-  in [ [column f j | j <- [0..n-1]] | f <- free ]
-
--- 有理数ベクトルを原始整数ベクトルへ直す。
---
--- 1. 分母の最小公倍数を掛けて整数化する。
--- 2. 全成分の最大公約数で割る。
--- 3. 最初の非零成分を正にそろえる。
---
--- ここで得るのは個々のベクトルの整数化であり、
--- 整数核全体の「整数格子の基底」を求める処理ではない。
+-- 分母を払い、成分の最大公約数と符号をそろえる。
+-- 個々のベクトルの整数化であり、整数核の格子基底は求めない。
 primitive :: Row -> [Integer]
 primitive row =
   let
@@ -259,23 +174,19 @@ primitive row =
       ints = map (\x -> numerator (x * fromInteger l)) row
       g = foldl' gcd 0 (map abs ints)
       v = if g == 0 then ints else map (`div` g) ints
+
   in case dropWhile (== 0) v of
-       (x:_) | x < 0 -> map negate v
+       (x : _) | x < 0 -> map negate v
        _ -> v
 
--- 各基準量の次元ベクトルを列に並べ、次元行列 M を作る。
--- M のサイズは「次元座標数 × 基準量数」。
+-- 基準量の次元ベクトルを列に並べる。
 dimensionMatrix :: [Reference] -> Matrix
 dimensionMatrix =
   transpose . map (map fromInteger . referenceDim)
 
--- E の行空間を ker M まで拡張するための追加ベクトルを選ぶ。
---
--- 前提:
---   E の各行は ker M に属する。
---
--- 核基底の各ベクトルについて、追加すると階数が増える場合だけ採用。
--- 返すのは追加したベクトルだけであり、拡張行列全体ではない。
+-- E の行空間を ker M まで補う行を選ぶ。
+-- 既存行と、それまでに追加した行から独立なものだけを採用する。
+-- E の各行が ker M に属することを前提とする。
 completion :: Int -> Matrix -> Matrix -> Matrix
 completion n e m =
   snd (foldl' step (e, []) (nullspace n m))
@@ -286,29 +197,18 @@ completion n e m =
       | otherwise =
           (rows, added)
 
--- ============================================================
--- 基準係数と基準量変更の検査
--- ============================================================
 
--- product_i scales_i^(exponents_i) を厳密に計算する。
---
--- scales に基準量の数値 b_i を渡すと基準係数、
--- 変更倍率 lambda_i を渡すと係数の変更比になる。
---
--- (^^) は整数指数を扱うため、負指数も使用できる。
--- リスト長の一致は呼出し側で保証する。
+-- 基準係数と基準量変更
+
+-- 基準値を渡せば係数、変更倍率を渡せば係数の変更比になる。
+-- 指数には負の整数も許す。リスト長は呼出し側で確認する。
 factorValue :: [Rational] -> [Integer] -> Rational
 factorValue scales exponents =
   product (zipWith (^^) scales exponents)
 
--- 基準量変更を検査する中心関数。
---
--- 実核を張る有理数基底を整数化すれば十分であり、
--- 整数核の整数基底までは必要ない。
--- 正倍率のため、分母払いで「倍率積 = 1」の条件は変わらない。
---
--- 対数座標で議論できるが、実装では対数を近似計算せず、
--- 有理数の倍率積が厳密に 1 かを判定する。
+-- 登録係数の保存と、全次元関係の保存を別々に判定する。
+-- 対数は計算せず、有理数の倍率積を直接比較する。
+-- 倍率が正なので、核基底の分母払いでも検査条件は変わらない。
 audit :: Policy -> Contract -> [Rational] -> Either String Audit
 audit policy contract lambdas = do
   d <- validateReferences rs
@@ -319,16 +219,13 @@ audit policy contract lambdas = do
       e = map (map fromInteger) eInt
       m = dimensionMatrix rs
 
-  -- 各基準量に一つずつ正倍率を指定する。
   ensure (length lambdas == n && all (> 0) lambdas)
          "Invalid positive multipliers"
 
-  -- 各係数指数行の成分数は基準量数に一致する。
   ensure (all ((== n) . length) eInt)
          "Exponent-vector length mismatch"
 
-  -- 各係数が無次元積を表すことを検証する。
-  -- 各行 z に対する M z = 0、全体では M E^T = 0。
+  -- 登録した係数が無次元かを確認する：M E^T = 0。
   ensure
     (all
       (\z -> all (== 0)
@@ -341,40 +238,29 @@ audit policy contract lambdas = do
 
   let
       scales = map referenceScale rs
-
-      -- 変更前の係数 k_a。
       old = map (factorValue scales) eInt
-
-      -- 係数の変更比 k_a' / k_a。
       ratios = map (factorValue lambdas) eInt
-
-      -- 変更後の係数 k_a'。
       new = zipWith (*) old ratios
 
-      -- 全次元関係を張る整数指数と、それぞれの倍率積。
+      -- ker M を張る指数による全関係の検査。
       full =
         [ (z, factorValue lambdas z)
         | z <- map primitive (nullspace n m)
         ]
 
-      -- 既存の係数検査に追加すべき指数と、その倍率積。
+      -- 既存の係数検査を補う追加条件。
       extra =
         [ (z, factorValue lambdas z)
         | z <- map primitive (completion n e m)
         ]
 
-      -- 選択した基準係数が全て保存されるか。
       gf = all (== 1) ratios
-
-      -- 全次元関係が保存されるか。
       gd = all ((== 1) . snd) full
 
-      -- 元の係数検査に不足する独立な線形条件数。
+      -- delta は検査構造の不足数であり、今回の不合格数ではない。
       delta = n - rank n e - rank n m
 
-      -- 係数保存仕様では gf のみ、
-      -- 共通次元倍率仕様では gf と gd の両方を要求する。
-      -- 登録条件 M E^T = 0 の下では gd は gf を含意する。
+      -- M E^T = 0 の下では gd から gf が従う。
       ok = gf && (policy == PreserveFactorsOnly || gd)
 
   pure
@@ -387,12 +273,11 @@ audit policy contract lambdas = do
   where
     rs = contractReferences contract
 
--- ============================================================
--- 登録モデルの検証と基準係数の導出
--- ============================================================
 
--- 元の量の式が、登録情報の下で整合しているかを検証する。
--- 物理モデルそのものの妥当性を証明する処理ではない。
+-- モデルからの係数導出
+
+-- 登録した各項の次元と出力次元が一致するかを確認する。
+-- 物理モデル自体の妥当性を検証するものではない。
 validateModel :: Model -> Either String ()
 validateModel model = do
   d <- validateReferences rs
@@ -402,7 +287,6 @@ validateModel model = do
       valid Nothing = True
       valid (Just i) = i >= 0 && i < n
 
-  -- 入力・出力が存在する基準量を参照しているか。
   ensure
     (all (valid . variableReference) vs
       && valid (modelOutput model))
@@ -415,17 +299,15 @@ validateModel model = do
   ensure (not (null ts))
          "Empty model"
 
-  -- 各項に、全入力変数分の指数が必要。
   ensure
     (all ((== length vs) . length . termPowers) ts)
     "Term arity mismatch"
 
-  -- 元モデルは零項を除いた形で登録する。
+  -- 元モデルは、同類項をまとめて零項を除いた形で登録する。
   ensure
     (all ((/= 0) . termCoefficient) ts)
     "Zero term: combine like terms first"
 
-  -- 元モデルは同類項をまとめた形で登録する。
   ensure
     (length (nub (map termPowers ts)) == length ts)
     "Duplicate monomials"
@@ -436,14 +318,12 @@ validateModel model = do
 
       outDim = dimOf (modelOutput model)
 
-      -- 単項式の次元は、各変数の次元×指数の総和。
       dimTerm t =
         foldl' (zipWith (+)) (replicate d 0)
           [ map (* p) (dimOf (variableReference v))
-          | (p,v) <- zip (termPowers t) vs
+          | (p, v) <- zip (termPowers t) vs
           ]
 
-  -- 全項が出力と同じ次元を持つことを要求する。
   ensure
     (all ((== outDim) . dimTerm) ts)
     "Dimensionally inhomogeneous model"
@@ -453,7 +333,7 @@ validateModel model = do
     vs = modelVariables model
     ts = modelTerms model
 
--- モデルの各項から基準係数の指数行列 E を導出する。
+-- 入力基準量の指数を合算し、出力基準量の指数を1引いて E を作る。
 contractFromModel :: Model -> Either String Contract
 contractFromModel model = do
   validateModel model
@@ -462,30 +342,23 @@ contractFromModel model = do
       rs = modelReferences model
       n = length rs
 
-      -- 入力側で基準量 i を使う変数の指数を合計し、
-      -- 出力基準量が i なら、出力で割る分の 1 を引く。
-      --
-      -- 同じ基準量を使う入力変数が複数あれば指数を合算する。
       exponent t i =
         sum
           [ p
-          | (p,v) <-
+          | (p, v) <-
               zip (termPowers t) (modelVariables model)
           , variableReference v == Just i
           ]
         - (if modelOutput model == Just i then 1 else 0)
 
-      -- 各項に対応する指数行を生成する。
-      -- 異なる項の基準係数が同じなら、重複行ができてもよい。
       rows =
-        [ [exponent t i | i <- [0..n-1]]
+        [ [exponent t i | i <- [0..n - 1]]
         | t <- modelTerms model
         ]
 
   pure (Contract (modelName model) rs rows)
 
--- 各元係数 c_beta に基準係数 k_beta を掛け、
--- 正規化後の式の項を生成する。
+-- 各項の元係数に、導出した基準係数を掛ける。
 normalizedTerms :: Model -> Either String [Term]
 normalizedTerms model = do
   c <- contractFromModel model
@@ -499,15 +372,13 @@ normalizedTerms model = do
 
   pure
     [ Term (termCoefficient t * k) (termPowers t)
-    | (t,k) <- zip (modelTerms model) factors
+    | (t, k) <- zip (modelTerms model) factors
     ]
 
--- ============================================================
--- 候補式の係数比較と数値評価
--- ============================================================
 
--- 同類項をまとめ、零係数項を除き、指数順に並べる。
--- 候補式には同類項の重複があっても、この処理で整理できる。
+-- 候補式の比較と数値評価
+
+-- 同類項をまとめ、零項を除いて指数順に並べる。
 combine :: [Term] -> [Term]
 combine ts =
   [ Term c p
@@ -521,11 +392,8 @@ combine ts =
   , c /= 0
   ]
 
--- 独立な形式単項式の係数を比較する。
--- 一つの数値入力で結果が一致するかを調べる処理ではない。
---
--- 必要式・候補式の一方にしかない項も、他方の係数を 0 として比較。
--- 入力変数間に追加関係がある場合の同値判定は扱わない。
+-- 独立な形式変数について係数を比較する。
+-- 一点での値の一致や、変数間の追加関係による同値性は扱わない。
 checkCandidate :: Model -> [Term] -> Either String [Mismatch]
 checkCandidate model candidate = do
   expected <- normalizedTerms model
@@ -539,7 +407,6 @@ checkCandidate model candidate = do
   let
       a = combine expected
       b = combine candidate
-
       powers = sort (nub (map termPowers (a ++ b)))
 
       coeff ts p =
@@ -557,10 +424,8 @@ checkCandidate model candidate = do
     , x /= y
     ]
 
--- Laurent 多項式を指定入力で評価する。
---
--- 数値入力は正規化値を想定するが、ここでは単なる有理数リスト。
--- 次元や基準量識別情報は保持・検査しない。
+-- 指定入力で Laurent 多項式を評価する。
+-- 入力は数値だけを受け取り、次元や基準量の情報は検査しない。
 evaluateTerms :: Int -> [Term] -> [Rational] -> Either String Rational
 evaluateTerms arity ts xs = do
   ensure
@@ -568,11 +433,10 @@ evaluateTerms arity ts xs = do
       && all ((== arity) . length . termPowers) ts)
     "Evaluation arity mismatch"
 
-  -- 負指数を持つ変数への零入力を拒否する。
   ensure
     (all
       (\t -> all
-        (\(x,p) -> x /= 0 || p >= 0)
+        (\(x, p) -> x /= 0 || p >= 0)
         (zip xs (termPowers t)))
       ts)
     "Zero denominator in Laurent monomial"
@@ -584,12 +448,10 @@ evaluateTerms arity ts xs = do
       | t <- ts
       ])
 
--- ============================================================
--- 具体例の登録
--- ============================================================
 
--- SI 次元座標の順序は、長さ・質量・時間・電流。
--- 電圧次元 = 抵抗次元 + 電流次元。
+-- 具体例
+
+-- 使用する次元：電圧 = 抵抗 + 電流。
 vDim, rDim, iDim :: Dim
 vDim = [2,1,-3,-1]
 rDim = [2,1,-3,-2]
@@ -597,20 +459,13 @@ iDim = [0,0,0,1]
 
 currentModel, ratioModel, twoInputModel :: Model
 
--- 電流換算:
---   I = (Vo - Voff) / (G * Rs)
---
--- 基準量順:
---   [VB, RB, IB] = [1 V, 1 ohm, 0.1 A]
---
--- 入力順:
---   [vo, voff, gain, rs]
---
--- 各項の基準係数は VB/(RB*IB) = 10 = kappa^(-1)。
+-- 電流換算：I = (Vo - Voff)/(G*Rs)
+-- 基準量 [VB, RB, IB] = [1 V, 1 ohm, 0.1 A]。
+-- 入力順は [vo, voff, gain, rs]。両項の基準係数は10。
 currentModel = Model "Current conversion"
   [ Reference "VB" vDim 1
   , Reference "RB" rDim 1
-  , Reference "IB" iDim (1%10)
+  , Reference "IB" iDim (1 % 10)
   ]
   [ Variable "vo" (Just 0)
   , Variable "voff" (Just 0)
@@ -622,14 +477,10 @@ currentModel = Model "Current conversion"
   , Term (-1) [0,1,-1,-1]
   ]
 
--- 電圧比:
---   V1 / V2
---
--- 出力は無次元で基準 1。
--- 基準量比 U1/U2 = 10 が正規化式の係数になる。
+-- 電圧比 V1/V2。無次元出力だが、基準量比 U1/U2 = 10 が残る。
 ratioModel = Model "Voltage ratio"
   [ Reference "U1" vDim 1
-  , Reference "U2" vDim (1%10)
+  , Reference "U2" vDim (1 % 10)
   ]
   [ Variable "v1" (Just 0)
   , Variable "v2" (Just 1)
@@ -637,13 +488,9 @@ ratioModel = Model "Voltage ratio"
   Nothing
   [Term 1 [1,-1]]
 
--- 二入力モデル:
---   V = R1*I1 + R2*I2
---
--- 基準量順:
---   [VB, RB1, IB1, RB2, IB2]
---
--- 全基準量の初期数値を 1 とし、初期基準係数は二つとも 1。
+-- 二入力モデル：V = R1*I1 + R2*I2
+-- 基準量順は [VB, RB1, IB1, RB2, IB2]。
+-- 初期基準値はすべて1。
 twoInputModel = Model "Two-input model"
   [ Reference "VB" vDim 1
   , Reference "RB1" rDim 1
@@ -661,13 +508,8 @@ twoInputModel = Model "Two-input model"
   , Term 1 [0,0,1,1]
   ]
 
--- 電力基準量の比 PB1/PB2 の保存だけを登録する。
---
--- 正規化インピーダンス行列の全成分の保存を
--- 検査する Contract ではない。
---
--- 初期値:
---   PB1/PB2 = (1*1)/(1*2) = 1/2
+-- 電力基準比 PB1/PB2 の保存を調べる。初期値は1/2。
+-- 正規化インピーダンス行列の全成分を検査するものではない。
 reciprocityContract :: Contract
 reciprocityContract = Contract "Reciprocity power-base ratio"
   [ Reference "VB1" vDim 1
@@ -677,10 +519,8 @@ reciprocityContract = Contract "Reciprocity power-base ratio"
   ]
   [[1,1,-1,-1]]
 
--- 重み付き相反関係の数値比較。
---
--- z12, z21 は、ここでは正規化後の相互係数を表す。
--- audit による基準量変更の判定とは独立した補助関数。
+-- 正規化相互係数の重み付き相反関係を確認する。
+-- 基準量変更の audit とは別の数値比較。
 reciprocityHolds
   :: Rational
   -> Rational
@@ -692,43 +532,34 @@ reciprocityHolds pb1 pb2 z12 z21 = do
          "Power bases must be positive"
   pure (pb1 * z12 == pb2 * z21)
 
--- ============================================================
--- 試験用の IO 補助関数
--- ============================================================
 
--- 検証エラーならメッセージを表示して終了し、
--- 成功なら値を IO 内へ取り出す。
+-- 試験用の補助関数
+
+-- 検証エラーがあれば、その内容を表示して終了する。
 must :: Either String a -> IO a
 must = either die pure
 
--- 条件を満たさない試験があれば、その時点で終了する。
 assert :: String -> Bool -> IO ()
 assert label p =
   unless p (die ("FAILED: " ++ label))
 
--- 拒否されるべき入力が Left を返すかを確認する。
--- エラーメッセージの内容までは比較しない。
+-- 拒否されることだけを確認し、エラー文面までは比較しない。
 expectLeft :: String -> Either String a -> IO ()
-expectLeft label x = case x of
-  Left _ -> pure ()
-  Right _ -> die ("FAILED (expected rejection): " ++ label)
+expectLeft label x =
+  case x of
+    Left _ -> pure ()
+    Right _ -> die ("FAILED (expected rejection): " ++ label)
 
--- ============================================================
--- 登録回帰試験
--- ============================================================
+
+-- 回帰試験
 
 runTests :: IO ()
 runTests = do
-
-  -- ----------------------------------------------------------
-  -- 電流換算: 必要な基準係数と省略不可の確認
-  -- ----------------------------------------------------------
-
+  -- 電流換算：係数の導出と脱落の検出。
   cc <- must (contractFromModel currentModel)
   ca <- must (audit PreserveFactorsOnly cc [1,1,1])
 
-  -- 正項・負項とも基準係数は +10。
-  -- 負項の負号は元の termCoefficient に含まれる。
+  -- 負項の符号は元係数に含まれるので、基準係数は両項とも10。
   assert "current factor is inverse kappa"
     (initialFactors ca == [10,10])
 
@@ -736,11 +567,8 @@ runTests = do
     (not (initialOmissionAllowed ca))
 
   correct <- must (normalizedTerms currentModel)
-
-  -- 自動導出した正規化式との比較では不一致なし。
   good <- must (checkCandidate currentModel correct)
 
-  -- 元係数だけの式を候補とすると、基準係数の脱落を検出する。
   bad <- must
     (checkCandidate currentModel (modelTerms currentModel))
 
@@ -750,94 +578,80 @@ runTests = do
   assert "missing current factor detected"
     (length bad == 2)
 
-  -- ----------------------------------------------------------
-  -- 電流換算: 指定入力で正しい式と脱落式を評価
-  -- ----------------------------------------------------------
-
+  -- 同じ入力で正規化電流を比較する。
   x <- must
-    (evaluateTerms 4 correct [1%5,0,10,1%10])
+    (evaluateTerms 4 correct [1 % 5,0,10,1 % 10])
 
   y <- must
     (evaluateTerms 4 (modelTerms currentModel)
-      [1%5,0,10,1%10])
+      [1 % 5,0,10,1 % 10])
 
-  -- x, y は復元電流ではなく正規化電流。
   assert "current correct/wrong"
-    (x == 2 && y == 1%5)
+    (x == 2 && y == 1 % 5)
 
-  -- 表の復元電流と相対偏りを、登録した出力基準量で確認する。
-  -- ここでは電流モデルの出力基準量が IB（添字2）である。
-  let ib = referenceScale (modelReferences currentModel !! 2)
+  -- 出力基準量 IB で電流を復元し、脱落による相対偏りを確認する。
+  let
+      ib = referenceScale (modelReferences currentModel !! 2)
       restoredCorrect = ib * x
       restoredWrong = ib * y
       relativeBias =
         (restoredWrong - restoredCorrect) / restoredCorrect
 
   assert "restored correct current"
-    (restoredCorrect == 1%5)
+    (restoredCorrect == 1 % 5)
 
   assert "restored current with omitted factor"
-    (restoredWrong == 1%50)
+    (restoredWrong == 1 % 50)
 
   assert "relative bias from omitted factor"
-    (relativeBias == (-9)%10)
+    (relativeBias == (-9) % 10)
 
-  -- vo == voff の入力では、誤った式でも結果が 0 になる。
+  -- vo = voff では両式とも0になるが、形式的な不一致は残る。
   cz <- must
-    (evaluateTerms 4 correct [1%5,1%5,10,1%10])
+    (evaluateTerms 4 correct [1 % 5,1 % 5,10,1 % 10])
 
   wz <- must
     (evaluateTerms 4 (modelTerms currentModel)
-      [1%5,1%5,10,1%10])
+      [1 % 5,1 % 5,10,1 % 10])
 
-  -- 一点で結果が一致しても、係数不一致は消えない。
   assert "one input hides error"
     (cz == 0 && wz == 0 && not (null bad))
 
-  -- ----------------------------------------------------------
-  -- 基準量変更: 省略可能性と係数保存の区別
-  -- ----------------------------------------------------------
-
-  -- VB だけを 1/10 倍すると、係数は 10 から 1 へ変わる。
+  -- VB を1/10倍すると係数は10から1になる。
+  -- 省略可能になることと、元の係数を保存することは別。
   changed <- must
-    (audit PreserveFactorsOnly cc [1%10,1,1])
+    (audit PreserveFactorsOnly cc [1 % 10,1,1])
 
-  -- 変更後は省略可能だが、変更前の係数は保存されない。
   assert "new omission allowed but coefficients changed"
     (changedOmissionAllowed changed
       && not (factorPreserved changed))
 
-  -- 基準量の数値を実際に変更したモデルを作る。
   let
       rs2 =
         zipWith
-          (\r l -> r {referenceScale = referenceScale r*l})
+          (\r l -> r {referenceScale = referenceScale r * l})
           (modelReferences currentModel)
-          [1%10,1,1]
+          [1 % 10,1,1]
 
       newModel =
         currentModel {modelReferences = rs2}
 
   newTerms <- must (normalizedTerms newModel)
 
-  -- 同じ電圧を表すには、電圧の正規化値を 10 倍する。
-  -- 出力の電流基準量は変更していないので、出力値は同じになる。
+  -- 同じ物理入力に合わせて電圧の正規化値も変更する。
   newValue <- must
-    (evaluateTerms 4 newTerms [2,0,10,1%10])
+    (evaluateTerms 4 newTerms [2,0,10,1 % 10])
 
   assert "updated coefficient covariance"
     (newValue == x)
 
-  -- 基準量変更後に古い係数を使い続ける誤りを検出する。
+  -- 基準量を変えた後に旧係数を使うと不一致になる。
   stale <- must (checkCandidate newModel correct)
 
   assert "stale coefficients detected"
     (not (null stale))
 
-  -- ----------------------------------------------------------
-  -- 電圧比: 基準量比の脱落検出と数値評価
-  -- ----------------------------------------------------------
-
+  -- 電圧比：基準量比を落とした候補式との比較。
   rc <- must (contractFromModel ratioModel)
   ra <- must (audit PreserveFactorsOnly rc [1,1])
 
@@ -854,20 +668,16 @@ runTests = do
     (evaluateTerms 2 (modelTerms ratioModel) [2,10])
 
   assert "voltage ratio without reference-factor correction"
-    (rawRatio == 1%5)
+    (rawRatio == 1 % 5)
 
   assert "ratio omission and value"
     (not (null rb) && rv == 2)
 
-  -- ----------------------------------------------------------
-  -- 二入力例: 同じ変更を二つの仕様で判定
-  -- ----------------------------------------------------------
-
+  -- 二入力モデル：同じ変更を二つの仕様で判定する。
   tc <- must (contractFromModel twoInputModel)
 
-  -- 各入力枝で抵抗倍率と電流倍率の積は 1。
-  -- ただし、枝間の抵抗倍率は 2 と 3 で異なる。
-  let independent = [1,2,1%2,3,1%3]
+  -- 各枝の抵抗・電流倍率の積は1だが、抵抗倍率は枝間で異なる。
+  let independent = [1,2,1 % 2,3,1 % 3]
 
   tf <- must
     (audit PreserveFactorsOnly tc independent)
@@ -883,17 +693,12 @@ runTests = do
   assert "same bases violate common-scale specification"
     (not (policySatisfied td))
 
-  -- 不足する独立条件は 1 本であり、
-  -- 今回の変更はその追加条件を満たさない。
   assert "two-input gap and completion"
     (remainingDegrees td == 1
       && length (additionalChecks td) == 1
       && any ((/= 1) . snd) (additionalChecks td))
 
-  -- ----------------------------------------------------------
-  -- 追加条件を E に組み込む
-  -- ----------------------------------------------------------
-
+  -- 追加条件を登録し、拡張後の係数保存検査でも元の変更を拒否する。
   let
       extraRows = map fst (additionalChecks td)
 
@@ -906,47 +711,38 @@ runTests = do
   t2 <- must
     (audit CommonDimensionScaling tc2 independent)
 
-  -- 拡張後は不足数が 0。
-  -- その結果、元の変更を拡張後の係数保存検査でも拒否できる。
   assert "completion eliminates gap"
     (remainingDegrees t2 == 0
       && not (factorPreserved t2))
 
-  -- 抵抗共通倍率 2、電流共通倍率 3、電圧倍率 6 の変更。
+  -- 電圧6倍、抵抗2倍、電流3倍なら共通次元倍率の条件を満たす。
   coherent <- must
     (audit CommonDimensionScaling tc [6,2,3,2,3])
 
   assert "coherent scaling accepted"
     (policySatisfied coherent)
 
-  -- ----------------------------------------------------------
-  -- 相反比: 比の保存と共通次元倍率の区別
-  -- ----------------------------------------------------------
-
+  -- 電力基準比は保存されても、共通次元倍率の条件は満たさない。
   pr <- must
     (audit PreserveFactorsOnly reciprocityContract
-      [2,1%2,3,1%3])
+      [2,1 % 2,3,1 % 3])
 
   assert "reciprocity contract gap"
     (remainingDegrees pr == 1
       && factorPreserved pr
       && not (allDimensionRelationsPreserved pr))
 
-  -- 初期比が 1/2 なので、保存されても省略はできない。
   assert "unequal power bases cannot be omitted"
-    (initialFactors pr == [1%2]
+    (initialFactors pr == [1 % 2]
       && not (initialOmissionAllowed pr))
 
-  -- 重み付き相反関係は成立するが、通常の対称性はない例。
+  -- 非対称な正規化行列でも、重み付き相反関係は成立する。
   rh <- must (reciprocityHolds 1 2 2 1)
 
   assert "weighted reciprocity without ordinary symmetry"
     (rh && (2 :: Rational) /= 1)
 
-  -- ----------------------------------------------------------
-  -- 不正入力の拒否
-  -- ----------------------------------------------------------
-
+  -- 不正入力を拒否できることを確認する。
   expectLeft "zero multiplier"
     (audit PreserveFactorsOnly cc [0,1,1])
 
@@ -980,14 +776,8 @@ runTests = do
   expectLeft "zero denominator"
     (evaluateTerms 4 correct [1,0,0,1])
 
-  -- ----------------------------------------------------------
-  -- 具体的な二入力行列に対する有限回帰試験
-  -- ----------------------------------------------------------
-
-  -- 各倍率を {1,2} から選び、2^5 = 32 点を全て検査する。
-  --
-  -- これは具体的な行列に対するソフトウェア回帰試験であり、
-  -- 一般の行列についての恒等性・包含関係の証明ではない。
+  -- {1,2}^5 の32点で、包含関係と補完後の一致を回帰検査する。
+  -- この有限検査を一般の場合の証明とするものではない。
   let
       grid =
         [ [a,b,c,d,e]
@@ -1002,20 +792,16 @@ runTests = do
     z <- must (audit PreserveFactorsOnly tc ls)
     q <- must (audit PreserveFactorsOnly tc2 ls)
 
-    -- GD なら GF であることを確認。
-    -- 論理式「not GD || GF」は含意 GD => GF を表す。
     assert "finite regression: GD subset GF"
       (not (allDimensionRelationsPreserved z)
         || factorPreserved z)
 
-    -- 追加条件で補完した後は、GF と GD の判定が一致する。
     assert "finite regression: completed GF equals GD"
       (factorPreserved q
         == allDimensionRelationsPreserved q)
 
--- ============================================================
--- 検査結果の表示
--- ============================================================
+
+-- 結果の表示
 
 printAudit :: Policy -> Contract -> [Rational] -> IO ()
 printAudit policy contract ls = do
@@ -1053,8 +839,7 @@ printAudit policy contract ls = do
     ("Common dimension scaling (GD): "
       ++ show (allDimensionRelationsPreserved a))
 
-  -- delta は検査構造の不足数であり、
-  -- 今回の変更における不合格条件数ではない。
+  -- 元の検査行列に対する不足数。
   putStrLn
     ("delta: " ++ show (remainingDegrees a))
 
@@ -1066,21 +851,13 @@ printAudit policy contract ls = do
     ("Selected policy satisfied: "
       ++ show (policySatisfied a))
 
--- ============================================================
--- エントリーポイント
--- ============================================================
 
 main :: IO ()
 main = do
-  -- 一つでも登録試験が失敗すると、ここで異常終了する。
   runTests
-
-  -- 全登録試験を通過した場合だけ表示する。
-  -- プログラム全体や一般理論の正しさの証明を意味しない。
   putStrLn "All registered regression checks passed."
 
-  -- 電流換算と電圧比について、
-  -- 変更なしの検査結果と係数脱落候補の不一致を表示する。
+  -- 変更なしの場合の係数と、省略候補の不一致を表示する。
   forM_ [currentModel, ratioModel] $ \model -> do
     c <- must (contractFromModel model)
 
@@ -1098,17 +875,16 @@ main = do
 
   tc <- must (contractFromModel twoInputModel)
 
-  -- 同じ変更でも、要求仕様によって最終合否が異なる例。
+  -- 同じ変更を係数保存仕様と共通次元倍率仕様で比較する。
   printAudit PreserveFactorsOnly
-    tc [1,2,1%2,3,1%3]
+    tc [1,2,1 % 2,3,1 % 3]
 
   printAudit CommonDimensionScaling
-    tc [1,2,1%2,3,1%3]
+    tc [1,2,1 % 2,3,1 % 3]
 
-  -- 共通次元倍率に従う変更。
   printAudit CommonDimensionScaling
     tc [6,2,3,2,3]
 
-  -- 電力基準量の比だけを保存する変更。
+  -- 電力基準比を保存する変更。
   printAudit PreserveFactorsOnly
-    reciprocityContract [2,1%2,3,1%3]
+    reciprocityContract [2,1 % 2,3,1 % 3]
